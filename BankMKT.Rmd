@@ -61,6 +61,7 @@ We are going to analyze the continuous variables and the factors separately and 
 #### Continuous Variables
 
 We will plot the relationship between the variables and the dependent variables.
+
 ```{r cont, echo=FALSE}
 p1 <- train_set %>% ggplot(aes(y,age)) + geom_boxplot()
 
@@ -83,13 +84,14 @@ p9 <- train_set %>% ggplot(aes(y,nr.employed)) + geom_boxplot()
 grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, nrow = 2)
 ```
 
+
 ```{r removeplots, echo=FALSE}
 rm(p1,p2,p3,p4,p5,p6,p7,p8,p9)
 ```
 For yes and no we see overlapping on all variables, but in some variables we see a higher mean for the no variable. We do not find a variable that is strongly predictive on the dependent variable.
 
 Next we need to see the distribution of the variables. 
-```{r dist1}
+```{r dist1, message=FALSE}
 train_set %>% keep(is.numeric) %>%  gather() %>% 
   ggplot(aes(value)) +
   facet_wrap(~ key, scales = "free") +
@@ -200,7 +202,7 @@ rm(val_index, val_set)
 set.seed(10, sample.kind="Rounding")
 ```
 
-```{r sets, echo=FALSE}
+```{r s, echo=FALSE}
 ls()
 ```
 
@@ -214,7 +216,7 @@ gl_model <- train(y ~ job + education + month + poutcome + pdays + nr.employed, 
 preds <- predict(gl_model, valid_set)
 ```
 
-```{r glmres, echo=FALSE}
+```{r glmres, echo=FALSE, message=FALSE}
 results <- data_frame(method = "GLM", 
                       Acc = confusionMatrix(valid_set$y,preds)$overall["Accuracy"], 
                       F1 = F_meas(valid_set$y,preds),
