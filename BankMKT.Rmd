@@ -1,0 +1,357 @@
+---
+title: "Bank Telemarketing"
+author: "Alan Tovar"
+date: "September 6, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits = 3)
+if(!require(RCurl)) install.packages("RCurl", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(randomForest)) install.packages("randomForest", repos = "http://cran.us.r-project.org")
+if(!require(fastDummies)) install.packages("fastDummies", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+#load libraries
+library(RCurl)
+library(tidyverse)
+library(caret)
+library(gridExtra)
+library(randomForest)
+library(fastDummies)
+library(data.table)
+library(knitr)
+
+x <- getURL("https://raw.githubusercontent.com/atovav/BankMkt/master/bank-additional-full.csv")
+customers <- read.csv(text = x, sep=";")
+rm(x)
+```
+
+## Overview
+
+We are going to use the Bank marketing data set from S. Moro, P. Cortez and P. Rita. A Data-Driven Approach to Predict the Success of Bank Telemarketing. Decision Support Systems, Elsevier, 62:22-31, June 2014.
+This data set comes from the UCI machine Learning repository, the full set consist of 41,188 observations and 21 variables consisting in bank client data (age, job, education, marital, default, housing, loan), related to the last contact from current campaign (contact, month, day of week, duration), other attributes (campaign, pdays, previous, poutcome), social and economic context attributes (emp. var. rate, cons. conf. idx, euribor3m, nr.employed) and the dependent variable if the client subscribed a term deposit.
+The data set will be divided into train set and test where we will predict if the the client subscribed a term deposit or not, we removed the duration variable as it is used only for benchmark purposes as it was added at the end of the campaign. We explored the data, and tried different methods including one hot encoding that resulted in a balance score and Specificity of - and - respectively on the test set.
+
+### Data Exploration
+
+First we split the data into a train and a test set. We are going to divide 20% to be the test set. We get the following structure for the train set.
+```{r sets, include=FALSE}
+customers <- customers[, !(names(customers) %in% c("duration"))]
+# Divide into train and test
+set.seed(2019, sample.kind="Rounding")
+test_index <- createDataPartition(y = customers$y, times = 1, p = 0.2, list = FALSE)
+train_set <- customers[-test_index,]
+test_set <- customers[test_index,]
+rm(test_index,customers)
+
+```
+
+```{r strtrainset}
+str(train_set)
+```
+
+We have 10 variables that are factors (excluding y), and 9 numeric columns.
+We are going to analyze the continuous variables and the factors separately and then we incorporate what we found to the models.
+
+#### Continuous Variables
+
+We will plot the relationship between the variables and the dependent variables.
+```{r cont, echo=FALSE}
+p1 <- train_set %>% ggplot(aes(y,age)) + geom_boxplot()
+
+p2 <- train_set %>% ggplot(aes(y,campaign)) + geom_boxplot()
+
+p3 <- train_set %>% ggplot(aes(y,pdays)) + geom_boxplot()
+
+p4 <- train_set %>% ggplot(aes(y,previous)) + geom_boxplot()
+
+p5 <- train_set %>% ggplot(aes(y,emp.var.rate)) + geom_boxplot()
+
+p6 <- train_set %>% ggplot(aes(y,cons.price.idx)) + geom_boxplot()
+
+p7 <- train_set %>% ggplot(aes(y,cons.conf.idx)) + geom_boxplot()
+
+p8 <- train_set %>% ggplot(aes(y,euribor3m)) + geom_boxplot()
+
+p9 <- train_set %>% ggplot(aes(y,nr.employed)) + geom_boxplot()
+
+grid.arrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, nrow = 2)
+```
+
+```{r removeplots, echo=FALSE}
+rm(p1,p2,p3,p4,p5,p6,p7,p8,p9)
+```
+For yes and no we see overlapping on all variables, but in some variables we see a higher mean for the no variable. We do not find a variable that is strongly predictive on the dependent variable.
+
+Next we need to see the distribution of the variables. 
+```{r dist1}
+train_set %>% keep(is.numeric) %>%  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+```
+
+The variables do not follow a normal distribution nor any other distribution, in fact except age the other variables are sparse regarding values.
+There could be variables that are similar to each other so we are going to calculate the distance between them and see if there are distinct variables.
+
+```{r heatmap}
+cont <- train_set %>% keep(is.numeric) %>% names()
+conset <- train_set[cont]
+d <- dist(t(as.matrix(conset)))
+heatmap(as.matrix(d), labRow = NA, labCol = NA)
+```
+
+We clearly see similar variables and 2 different variables those are:
+```{r clust, echo=FALSE}
+h <- hclust(d)
+groups <- cutree(h, k = 3)
+split(names(groups), groups)
+rm(h, cont, d,groups)
+```
+
+Finally we are going to perform PCA to see if we can find some interesting when using 2 components.
+```{r pca, echo=FALSE}
+pca <- prcomp(as.matrix(conset))
+data.frame(pca$x[,1:2], opted=train_set$y) %>% 
+  ggplot(aes(PC1,PC2, fill = opted))+
+  geom_point(cex=3, pch=21)
+rm(conset,pca)
+```
+
+We find two like clusters, one has only one yes point while the other cluster has the rest of the data, however it does not help us to divide the decision of the user.
+At the end, we are going to use pdays and nr. employed in our model as there are the ones that seems unique. 
+We are going to focus on the discrete variables.
+
+#### Discrete Variables
+
+We are going to take the proportion of yes vs total and plot it against each discrete variable to see the ones that give the most yes.
+
+```{r discrete, echo=FALSE}
+p1 <- train_set %>% group_by(job) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(job,Prop)) + geom_col()
+
+p2 <- train_set %>% group_by(marital) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(marital,Prop)) + geom_col()
+
+p3 <- train_set %>% group_by(education) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(education,Prop)) + geom_col()
+
+p4 <- train_set %>% group_by(default) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(default,Prop)) + geom_col()
+
+p5 <- train_set %>% group_by(housing) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(housing,Prop)) + geom_col()
+
+p6 <- train_set %>% group_by(loan) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(loan,Prop)) + geom_col()
+
+p7 <- train_set %>% group_by(contact) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(contact,Prop)) + geom_col()
+
+p8 <- train_set %>% group_by(month) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(month,Prop)) + geom_col()
+
+p9 <- train_set %>% group_by(day_of_week) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(day_of_week,Prop)) + geom_col()
+
+p10 <- train_set %>% group_by(poutcome) %>% summarize(Prop = sum(y=="yes")/n()) %>%
+  ggplot(aes(poutcome,Prop)) + geom_col()
+
+grid.arrange(p1,p3,nrow = 2)
+```
+
+```{r discrete2, echo=FALSE}
+grid.arrange(p2, p4, p5, p6, p7, p8, p9, p10, nrow = 2)
+```
+
+```{r, echo=FALSE}
+rm(p1,p2,p3,p4,p5,p6,p7,p8,p9,p10)
+```
+
+We find that there are variables with higher proportion on the factors such as poutcome meaning if the client accepted a previous campaign then is more likely to accept again. We find that job, education, month and poutcome are the ones with higher proportion of yes.
+
+We are going to count how many times each factor appears, to understand more about the data.
+```{r}
+train_set %>% keep(is.factor) %>%  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram(stat="count")
+```
+
+The most important thing is regarding the depended variable, the cases of yes are minimal compare to the no case. This will make predicting yes difficult as you have an insignificant amount, so as a recommendation this data set needs more data to improve the predictions.
+
+After looking at the data we will divide the train set into train and valid set in order to find the best model.
+```{r valset, include=FALSE}
+set.seed(20, sample.kind="Rounding")
+val_index <- createDataPartition(y = train_set$y, times = 1, p = 0.15, list = FALSE)
+strain_set <- train_set[-val_index,]
+val_set <- train_set[val_index,]
+valid_set <- na.omit(val_set)
+rm(val_index, val_set)
+
+```
+
+```{r, include=FALSE}
+set.seed(10, sample.kind="Rounding")
+```
+
+```{r sets, echo=FALSE}
+ls()
+```
+
+we have the strain and valid for model creation.
+
+### Models
+Our base model will be a lineal model made of 6 variables that we identified previously.
+
+```{r}
+gl_model <- train(y ~ job + education + month + poutcome + pdays + nr.employed, data = strain_set, method = "glm")
+preds <- predict(gl_model, valid_set)
+```
+
+```{r glmres, echo=FALSE}
+results <- data_frame(method = "GLM", 
+                      Acc = confusionMatrix(valid_set$y,preds)$overall["Accuracy"], 
+                      F1 = F_meas(valid_set$y,preds),
+                      Balance = confusionMatrix(valid_set$y,preds)$byClass["Balanced Accuracy"],
+                      Specificity = confusionMatrix(valid_set$y,preds)$byClass["Specificity"])
+kable(results)
+```
+
+```{r, echo=FALSE}
+rm(gl_model)
+```
+
+We look a 4 metrics, because no is more prevalent is easier to predict that variable therefore the accuracy will be high, but as a bank we are more interested in those who say yes.  Balance and specificity will help us in this regard.
+Our data does not follow a distribution nor a lineal relation, so a random forest model will be more useful.
+```{r rf1}
+rf <- randomForest(y ~ job + education + month + poutcome + pdays + nr.employed,
+                   data = strain_set, sampsize=5000, importance=TRUE)
+preds <- predict(rf, valid_set)
+```
+
+```{r rfres1, echo=FALSE}
+results <- bind_rows(results,
+                          data_frame(method="RF",  
+                                     Acc = confusionMatrix(valid_set$y,preds)$overall["Accuracy"], 
+                                     F1 = F_meas(valid_set$y,preds),
+                                     Balance = confusionMatrix(valid_set$y,preds)$byClass["Balanced Accuracy"],
+                                     Specificity = confusionMatrix(valid_set$y,preds)$byClass["Specificity"]))
+kable(results)
+```
+
+We see an improvement using random forest instead of lineal model.
+In order to improve more we will use a feature of random forest called variable importance, for this we will fit a random forest to all the variables.
+
+```{r, echo=FALSE}
+rf <- randomForest(y ~ ., data = strain_set, sampsize=5000, ntree=500, importance=TRUE)
+preds <- predict(rf, valid_set)
+results <- bind_rows(results,
+                     data_frame(method="RF All data",  
+                                Acc = confusionMatrix(valid_set$y,preds)$overall["Accuracy"], 
+                                F1 = F_meas(valid_set$y,preds),
+                                Balance = confusionMatrix(valid_set$y,preds)$byClass["Balanced Accuracy"],
+                                Specificity = confusionMatrix(valid_set$y,preds)$byClass["Specificity"]))
+kable(results)
+```
+
+
+We see it is worse than the previous forest, but we care about the variables.
+
+```{r}
+imp <- varImp(rf)
+imp
+```
+
+There are 8 variables above 10, so we are going to use those for the predictions. Some of them we had already used them in the previous method.
+
+```{r, echo=FALSE}
+keep <- setDT(imp, keep.rownames = "newname")[]
+keep <- keep  %>% filter(no > 10) %>% select(newname)
+keep <- as.vector(t(keep))
+impset <- strain_set[c("y",keep)]
+rm(imp)
+rf <- randomForest(y ~ ., data = impset, sampsize=5000, importance=TRUE)
+predsrf <- predict(rf, valid_set)
+results <- bind_rows(results,
+                     data_frame(method="RF imp",  
+                                Acc = confusionMatrix(valid_set$y,predsrf)$overall["Accuracy"], 
+                                F1 = F_meas(valid_set$y,predsrf),
+                                Balance = confusionMatrix(valid_set$y,predsrf)$byClass["Balanced Accuracy"],
+                                Specificity = confusionMatrix(valid_set$y,predsrf)$byClass["Specificity"]))
+kable(results)
+```
+
+
+We do not see any improvement from the first Random Forest. To better improve our model, we are going to use one hot encoding. 
+For one hot encoding we are going to take the categorical variables (e.g. contact) and convert each factor to a variable with 0 meaning it does not have that value and 1 it does have that value. So our data becomes like this:
+
+```{r}
+impset <- dummy_cols(impset, select_columns = c("job","contact","day_of_week", "poutcome"))
+str(impset)
+```
+
+After one hot encoding, we remove all the factors and create a new model with this data. Our result is the following:
+
+```{r, echo=FALSE}
+valid_set <- dummy_cols(valid_set, select_columns = c("job","contact","day_of_week", "poutcome"))
+drops <- c("job","contact","day_of_week", "poutcome")
+impset <- impset[ , !(names(impset) %in% drops)]
+colnames(impset)[colnames(impset)=="job_blue-collar"] <- "job_bluecollar"
+colnames(impset)[colnames(impset)=="job_self-employed"] <- "job_selfemployed"
+colnames(valid_set)[colnames(valid_set)=="job_blue-collar"] <- "job_bluecollar"
+colnames(valid_set)[colnames(valid_set)=="job_self-employed"] <- "job_selfemployed"
+#rf with one shot var
+rf <- randomForest(y ~ ., data = impset, sampsize=5000, importance=TRUE)
+predsrf <- predict(rf, valid_set)
+results <- bind_rows(results,
+                     data_frame(method="RF One hot",  
+                                Acc = confusionMatrix(valid_set$y,predsrf)$overall["Accuracy"], 
+                                F1 = F_meas(valid_set$y,predsrf),
+                                Balance = confusionMatrix(valid_set$y,predsrf)$byClass["Balanced Accuracy"],
+                                Specificity = confusionMatrix(valid_set$y,predsrf)$byClass["Specificity"]))
+kable(results)
+```
+
+
+We see a greater improvement, our specificity is around 0.6 so we are improving our predictions for clients that say yes. We are going to use this model for our test set as we didn't find other improvements as our data lacks more information for "yes", so it has a limit of how much it can predict with the information that we have.
+
+## Results and Conclusion
+
+Using the one hot encoding model with the important variables on our full train data to predict our test data we found the following result.
+```{r tr, echo=FALSE}
+imp <- varImp(rf)
+keep <- setDT(imp, keep.rownames = "newname")[]
+keep <- keep %>% select(newname)
+keep <- as.vector(t(keep))
+train_set <- dummy_cols(train_set, select_columns = c("job","contact","day_of_week", "poutcome"))
+test_set <- dummy_cols(test_set, select_columns = c("job","contact","day_of_week", "poutcome"))
+colnames(train_set)[colnames(train_set)=="job_blue-collar"] <- "job_bluecollar"
+colnames(train_set)[colnames(train_set)=="job_self-employed"] <- "job_selfemployed"
+colnames(test_set)[colnames(test_set)=="job_blue-collar"] <- "job_bluecollar"
+colnames(test_set)[colnames(test_set)=="job_self-employed"] <- "job_selfemployed"
+train_set <- train_set[c("y",keep)]
+
+rf <- randomForest(y ~ ., data = train_set, sampsize=5000)
+predsrf <- predict(rf, test_set)
+resultsf <- data_frame(method = "Final result", 
+                       Acc = confusionMatrix(test_set$y,predsrf)$overall["Accuracy"], 
+                       F1 = F_meas(test_set$y,predsrf),
+                       Balance = confusionMatrix(test_set$y,predsrf)$byClass["Balanced Accuracy"],
+                       Specificity = confusionMatrix(test_set$y,predsrf)$byClass["Specificity"])
+kable(resultsf)
+
+```
+
+
+From our last model with "partial data" to using all the data we found a huge improvement from .609 to 0.703 regarding specificity, and balance improved to 0.8. This model is fairly good, however it stills fails to better predict "yes", this is as we discussed earlier because the number of "yes" against "no" is low.
+Using one hot encoding was key to reach this score and we will find other sets where we can use it.
+For the next steps we will explore other models like neural networks or boosted trees to see if they can capture better the characteristics that will lead to a "yes". 
+
+Data source:
+S. Moro, P. Cortez and P. Rita. A Data-Driven Approach to Predict the Success of Bank Telemarketing. Decision Support Systems, Elsevier, 62:22-31, June 2014.
